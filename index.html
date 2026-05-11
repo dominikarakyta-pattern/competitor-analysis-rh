@@ -46,7 +46,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .scroll-with-filters { overflow: auto; padding: 14px 16px; height: calc(100vh - 172px); }
 
 /* OVERVIEW GRID */
-.ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
+.ov-grid { display: grid; grid-template-columns: 1fr; gap: 12px; max-width: 900px; margin: 0 auto; }
 .ov-card { background: #fff; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08); overflow: hidden; }
 .ov-head { background: #0f2347; color: #fff; padding: 11px 14px; font-size: 13px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
 .ov-head .ov-pricing-pill { font-size: 10px; font-weight: 600; color: #93c5fd; }
@@ -140,7 +140,7 @@ td:not(:first-child) { text-align: center; }
   </div>
   <div class="hdr-right">
     <span id="syncBadge" class="sync-badge">Checking Drive…</span>
-    <button class="sync-btn" onclick="refreshAll()">↻ Refresh</button>
+    <button class="sync-btn" onclick="loadMatrix()">↻ Reload</button>
   </div>
 </div>
 <div id="driveAlert" class="drive-alert">⚠️ The Google Drive spreadsheet was updated since this dashboard was built. Click Refresh to pull the latest feature matrix.</div>
@@ -208,7 +208,6 @@ td:not(:first-child) { text-align: center; }
 
 <script>
 // ─────────────────── CONFIG ───────────────────
-const DRIVE_ID   = '1JXxsCF0oHNaS0nj0F5v-rjPE0msEo3lWcdm8KNZVMg4';
 const BUILT_DATE = new Date('2026-05-11T20:00:00Z');
 
 // Corrections confirmed this session (applied on top of Drive data)
@@ -435,8 +434,6 @@ let activeCat  = 'all';
 let intelComp  = 'all';
 let intelUrgency = 'all';
 let matrixSections = [];
-let lastFetched = null;
-let refreshTimer = null;
 
 // ─────────────────── BADGE HELPER ───────────────────
 function badge(v, corrected) {
@@ -546,63 +543,95 @@ function filterIntel(el, type, val) {
 }
 
 // ─────────────────── RENDER MATRIX ───────────────────
-// Rows not yet in the Drive sheet — injected client-side after every parse
-const MATRIX_INJECTIONS = {
-  'PRODUCT PERFORMANCE MANAGEMENT': [
-    {after:'Dashboard: wasted spend / poor performers',
-     row:{f:'SMART Segments — AI-driven SKU segmentation (Top Performers / Poor Performers)',
-          rh:'TRUE',co:'NO',hu:'NO',ad:'NO',sm:'NO',ma:'NO',_corr:{}}},
-    {after:'SMART Segments — AI-driven SKU segmentation (Top Performers / Poor Performers)',
-     row:{f:'Segment Prioritization — Product Delivery Preference (PDP) allowlist (control SKU promotion without splitting catalogs)',
-          rh:'TRUE',co:'NO',hu:'NO',ad:'NO',sm:'NO',ma:'NO',_corr:{}}},
-  ],
-};
-
-function applyInjections(sections) {
-  for (const [sectionKey, injections] of Object.entries(MATRIX_INJECTIONS)) {
-    const words = sectionKey.split(' ').slice(0,3);
-    const sec = sections.find(s => words.every(w => s.name.toUpperCase().includes(w)));
-    if (!sec) continue;
-    for (const {after, row} of injections) {
-      if (sec.rows.some(r => r.f === row.f)) continue; // already present (fallback)
-      const idx = sec.rows.findIndex(r => r.f === after);
-      if (idx >= 0) sec.rows.splice(idx + 1, 0, row);
-      else sec.rows.push(row);
-    }
-  }
-  return sections;
-}
-
-function parseSheet(text) {
-  const lines = text.split('\n');
-  const secs = [];
-  let cur = null;
-  for (const line of lines) {
-    if (!line.includes('|')) continue;
-    const cells = line.split('|').map(s=>s.trim()).filter((_,i,a)=>i>0&&i<a.length-1);
-    if (!cells.length) continue;
-    if (cells.some(c=>c.includes(':-:'))) continue;
-    if (cells[0]==='Feature / Capability') continue;
-    if (['TRUE','YES, BUT','NO, BUT','NO','?'].includes(cells[0])) continue;
-    if (cells[0]===''&&cells[1]==='ROI Hunter') continue;
-    const hasData = cells.slice(1).some(c=>c!=='');
-    if (!hasData&&cells[0]) {
-      const cat = cells[0].includes('PRODUCT PERF')||cells[0].includes('MANAGEMENT')?'PPM':
-                  cells[0].includes('INTEGRAT')?'Integrations':
-                  cells[0].includes('IMAGE')?'Image':
-                  cells[0].includes('VIDEO')?'Video':
-                  cells[0].includes('AI ')||cells[0].includes('DYNAMIC')?'AI':'Pricing';
-      cur = {name:cells[0], cat, rows:[]};
-      secs.push(cur);
-    } else if (cur&&cells[0]) {
-      const row = {f:cells[0],rh:cells[1]||'?',co:cells[2]||'?',hu:cells[3]||'?',ad:cells[4]||'?',sm:cells[5]||'?',ma:cells[6]||'?',_corr:{}};
-      const fix = CORRECTIONS[cells[0]];
-      if (fix) { Object.assign(row._corr,fix); Object.assign(row,fix); }
-      cur.rows.push(row);
-    }
-  }
-  return secs;
-}
+// ─────────────────── EMBEDDED FEATURE MATRIX ───────────────────
+// Full matrix — updated directly in this file (no external dependency)
+// Column key: rh=ROI Hunter, hu=Hunch, sm=Smartly, ma=Marpipe, co=Confect.io, ad=AdSamurai
+const EMBEDDED_MATRIX = [
+  {name:'PRODUCT PERFORMANCE MANAGEMENT & ADS MANAGEMENT',cat:'PPM',rows:[
+    {f:'Filter products — Meta metrics',              rh:'TRUE',   hu:'YES,BUT',  sm:'NO',    ma:'YES,BUT',  co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Filter products — Google metrics',            rh:'TRUE',   hu:'NO',       sm:'NO',    ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Filter products — GA4 metrics',               rh:'TRUE',   hu:'YES,BUT',  sm:'NO',    ma:'NO',       co:'NO',   ad:'YES,BUT',_corr:{}},
+    {f:'Filter products — Adobe metrics',             rh:'TRUE',   hu:'NO',       sm:'NO',    ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Filter products — Snap metrics',              rh:'TRUE',   hu:'NO',       sm:'NO',    ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Filter products by feed attributes',          rh:'TRUE',   hu:'TRUE',     sm:'NO',    ma:'YES,BUT',  co:'NO',   ad:'YES,BUT',_corr:{}},
+    {f:'Analytical tools for product analysis',       rh:'TRUE',   hu:'YES,BUT',  sm:'NO',    ma:'YES,BUT',  co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'Product performance per campaign',            rh:'TRUE',   hu:'YES,BUT',  sm:'NO',    ma:'NO',       co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'Dashboard: wasted spend / poor performers',   rh:'TRUE',   hu:'YES,BUT',  sm:'NO',    ma:'YES,BUT',  co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'SMART Segments — AI-driven SKU segmentation (Top Performers / Poor Performers)',
+                                                      rh:'TRUE',   hu:'NO',       sm:'NO',    ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Segment Prioritization — PDP allowlist (control SKU promotion without splitting catalogs)',
+                                                      rh:'TRUE',   hu:'NO',       sm:'NO',    ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Create / Edit campaign inside platform',      rh:'TRUE',   hu:'TRUE',     sm:'TRUE',  ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Campaign Insights',                           rh:'TRUE',   hu:'NO',       sm:'TRUE',  ma:'NO',       co:'NO',   ad:'TRUE',   _corr:{}},
+  ]},
+  {name:'INTEGRATIONS WITH OTHER TOOLS',cat:'Integrations',rows:[
+    {f:'Native Integration — Meta',                   rh:'TRUE',   hu:'TRUE',     sm:'TRUE',  ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Native Integration — Google',                 rh:'TRUE',   hu:'TRUE',     sm:'TRUE',  ma:'NO',       co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'Native Integration — GA4',                    rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'Native Integration — Snap',                   rh:'TRUE',   hu:'TRUE',     sm:'TRUE',  ma:'TRUE',     co:'NO',   ad:'NO,BUT', _corr:{}},
+    {f:'Native Integration — Pinterest',              rh:'NO',     hu:'NO',       sm:'?',     ma:'TRUE',     co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Native Integration — TikTok',                 rh:'Beta\n(CPV, Q3 2026)',hu:'NO',sm:'TRUE',ma:'NO,BUT',co:'YES,BUT',ad:'TRUE',_corr:{}},
+    {f:'Native Integration — Adobe Analytics',        rh:'TRUE',   hu:'NO',       sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Upload creative assets via extra feed',       rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'Data quality: Meta Catalog vs feeds',         rh:'TRUE',   hu:'NO',       sm:'?',     ma:'NO',       co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'Integrations: ecomm (Shopify, VTEX…)',        rh:'YES,BUT',hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'YES,BUT',ad:'TRUE', _corr:{}},
+  ]},
+  {name:'IMAGE TEMPLATE EDITOR',cat:'Image',rows:[
+    {f:'Image Template Editor',                       rh:'TRUE',   hu:'TRUE',     sm:'TRUE',  ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Apply dynamic fields in template',            rh:'TRUE',   hu:'TRUE',     sm:'TRUE',  ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Apply custom fonts',                          rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Price formatting',                            rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Library of client-created templates',         rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Library of PRE-MADE templates',               rh:'TRUE',   hu:'NO',       sm:'?',     ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Upload template as .psd',                     rh:'?',      hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Upload template from Figma',                  rh:'NO',     hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Brand kit (fonts, logos, colors)',             rh:'NO',     hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Extra brand content in editor',               rh:'TRUE',   hu:'NO,BUT',   sm:'?',     ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Download template as image',                  rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'TRUE', ad:'NO',     _corr:{}},
+    {f:'Creative services (graphic designer)',         rh:'NO',     hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Creative collaboration / review tools',       rh:'NO',     hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+  ]},
+  {name:'VIDEO TEMPLATE EDITOR / CPV (CATALOG PRODUCT VIDEOS)',cat:'Video',rows:[
+    {f:'Max renders per creative',rh:'Unlimited\n(On-demand CPV)',hu:'up to 2,000\n/ template',sm:'On-demand\n(Meta co-dev, Oct 2025)',ma:'No stated\nlimit',co:'Beta (Pro+)\nNo limit stated',ad:'up to 50 prods\n(BETA)',_corr:{}},
+    {f:'Video Template Editor feature',               rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Apply dynamic fields in video template',      rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Library of PRE-MADE video templates',         rh:'TRUE',   hu:'NO',       sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Transform image→video template',              rh:'NO',     hu:'NO',       sm:'?',     ma:'NO',       co:'TRUE', ad:'NO',     _corr:{}},
+    {f:'Video animations in editor',                  rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'TRUE', ad:'NO',     _corr:{}},
+    {f:'Extra brand content in video editor',         rh:'TRUE',   hu:'NO,BUT',   sm:'?',     ma:'TRUE',     co:'TRUE', ad:'TRUE',   _corr:{}},
+    {f:'Render videos directly to Meta catalog',      rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'NO,BUT',   co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'Pick best products for CPV',                  rh:'TRUE',   hu:'YES,BUT',  sm:'?',     ma:'YES,BUT',  co:'NO',   ad:'YES,BUT',_corr:{}},
+    {f:'Upload video template as .psd',               rh:'?',      hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Royalty-free asset library in editor',        rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'Multi-product videos',                        rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Video placement previews',                    rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'NO',       co:'YES,BUT',ad:'NO',   _corr:{}},
+    {f:'Launch Video Dynamic Ads from platform',      rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Download video template as mp4',              rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Music / voiceovers',                          rh:'TRUE',   hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'TikTok Video Catalog Ads output',             rh:'Beta\n(CPV, Q3 2026)',hu:'NO',sm:'TRUE',ma:'NO,BUT',co:'YES,BUT',ad:'TRUE',_corr:{}},
+  ]},
+  {name:'AI / DYNAMIC TOOLS',cat:'AI',rows:[
+    {f:'Background removal — static templates',       rh:'TRUE',   hu:'TRUE',     sm:'TRUE',  ma:'TRUE',     co:'TRUE', ad:'NO',     _corr:{}},
+    {f:'Background removal — video templates',        rh:'NO',     hu:'TRUE',     sm:'TRUE',  ma:'NO',       co:'TRUE', ad:'NO',     _corr:{}},
+    {f:'Adapt to placement',                          rh:'MANUAL', hu:'AUTOMATIC',sm:'?',     ma:'AUTOMATIC',co:'MANUAL',ad:'AUTOMATIC',_corr:{}},
+    {f:'Dynamic color match to product color',        rh:'NO',     hu:'TRUE',     sm:'?',     ma:'TRUE',     co:'TRUE', ad:'NO',     _corr:{}},
+    {f:'AI product orientation (auto-learn)',          rh:'NO',     hu:'TRUE',     sm:'?',     ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'GenAI — generate additional images',          rh:'NO',     hu:'NO',       sm:'TRUE',  ma:'NO',       co:'NO',   ad:'TRUE',   _corr:{}},
+    {f:'Pre-flight AI creative analysis\n(predict attention / engagement before launch)',
+                                                      rh:'NO',     hu:'NO',       sm:'TRUE',  ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Post-flight creative AI insights\n(theme analysis, performance drivers)',
+                                                      rh:'NO',     hu:'NO',       sm:'TRUE',  ma:'NO',       co:'NO',   ad:'NO',     _corr:{}},
+    {f:'Multivariate creative testing\n(automated A/B across all combos)',
+                                                      rh:'NO',     hu:'NO',       sm:'NO',    ma:'TRUE',     co:'NO',   ad:'NO',     _corr:{}},
+    {f:'GenAI — scene / lifestyle background generation',rh:'TRUE',hu:'?',        sm:'?',     ma:'?',        co:'?',    ad:'?',      _corr:{}},
+    {f:'GenAI — shadow generation',                   rh:'TRUE',   hu:'?',        sm:'?',     ma:'?',        co:'?',    ad:'?',      _corr:{}},
+    {f:'GenAI — Visual Search (filter catalog images by text prompt)',
+                                                      rh:'TRUE',   hu:'?',        sm:'?',     ma:'?',        co:'?',    ad:'?',      _corr:{}},
+  ]},
+  {name:'PRICING & PACKAGING',cat:'Pricing',rows:[
+    {f:'Starting price',rh:'Undisclosed',hu:'From $500/mo\n(needs re-verify)',sm:'$2,500+/mo\nEnterprise custom',ma:'Flat fee by\nSKU count',co:'$500/mo\n30-day free trial',ad:'From €49/mo\n(was ~$600)',_corr:{}},
+  ]},
+];
 
 function renderMatrix() {
   const wrap = document.getElementById('matrixWrap');
@@ -626,12 +655,14 @@ function renderMatrix() {
     }
   }
   html += '</tbody></table>';
-  if (Object.keys(CORRECTIONS).length) {
-    html += `<div style="margin-top:10px;font-size:10px;color:#64748b;">
-      <span style="background:#dcfce7;border-radius:3px;padding:1px 5px;font-size:9px;font-weight:700;color:#15803d;margin-right:4px;">YES,BUT ✓</span>
-      Cells marked ✓ were verified this session and differ from the Drive sheet — update Drive to sync.
-    </div>`;
-  }
+  html += `<div style="margin-top:10px;font-size:10px;color:#64748b;">
+    <strong>Legend:</strong>
+    <span class="b bT" style="margin:0 4px">TRUE</span> Fully supported &nbsp;
+    <span class="b bYB" style="margin:0 4px">YES,BUT</span> Partial / caveats &nbsp;
+    <span class="b bNB" style="margin:0 4px">NO,BUT</span> Workaround exists &nbsp;
+    <span class="b bN" style="margin:0 4px">NO</span> Not supported &nbsp;
+    <span class="b bQ" style="margin:0 4px">?</span> Unverified
+  </div>`;
   wrap.innerHTML = html;
 }
 
@@ -659,114 +690,23 @@ function renderSources() {
     </div>`).join('');
 }
 
-// ─────────────────── LIVE DRIVE FETCH ───────────────────
-// Unwrap callMcpTool responses — handles 3 possible shapes:
-//  1. Array of content blocks: [{type:'text', text:'{"fileContent":"..."}'}]
-//  2. Plain string (already the JSON or the markdown text itself)
-//  3. Object: {fileContent:'...'} or {content:'...'}
-function unwrapMcpText(res) {
-  if (Array.isArray(res)) {
-    const block = res.find(b => b && b.type === 'text') || res[0] || {};
-    return unwrapMcpText(block.text || '');
-  }
-  if (typeof res === 'string') {
-    const trimmed = res.trim();
-    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-      try { return unwrapMcpText(JSON.parse(trimmed)); } catch {}
-    }
-    return trimmed; // raw markdown table
-  }
-  if (res && typeof res === 'object') {
-    const val = res.fileContent || res.content || res.text || '';
-    return typeof val === 'string' ? val : unwrapMcpText(val);
-  }
-  return '';
-}
-
-async function fetchMatrixFromDrive() {
+// ─────────────────── LOAD MATRIX ───────────────────
+function loadMatrix() {
   const status = document.getElementById('matrixStatus');
-  status.innerHTML = '<span class="spinner"></span> Fetching live from Google Drive…';
-  try {
-    const res = await window.cowork.callMcpTool(
-      'mcp__2a2fdae5-346e-4c03-ab92-97c6ce29038c__read_file_content',
-      {fileId: DRIVE_ID}
-    );
-    const content = unwrapMcpText(res);
-    if (!content || !content.includes('|')) throw new Error('Empty or unparseable response');
-    matrixSections = applyInjections(parseSheet(content));
-    if (!matrixSections.length) throw new Error('parseSheet returned no sections');
-    lastFetched = new Date();
-    renderMatrix();
-    const ts = lastFetched.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
-    status.innerHTML = `<span style="color:#16a34a">✓</span> Live from Google Drive · Last fetched ${ts} · <span style="cursor:pointer;color:#2563eb" onclick="fetchMatrixFromDrive()">Refresh</span>`;
-  } catch(e) {
-    status.innerHTML = `<span style="color:#dc2626">⚠️ Drive fetch failed</span> — showing embedded data · <span style="cursor:pointer;color:#2563eb" onclick="fetchMatrixFromDrive()">Retry</span>`;
-    matrixSections = applyInjections([...FALLBACK_MATRIX]);
-    renderMatrix();
-  }
+  const badge  = document.getElementById('syncBadge');
+  matrixSections = EMBEDDED_MATRIX;
+  renderMatrix();
+  const d = BUILT_DATE.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  status.innerHTML = `<span style="color:#16a34a">✓</span> Embedded data · Updated ${d}`;
+  badge.textContent = `✓ Data as of ${d}`;
+  badge.className = 'sync-badge ok';
 }
-
-async function checkDriveMeta() {
-  const badge = document.getElementById('syncBadge');
-  try {
-    const res = await window.cowork.callMcpTool(
-      'mcp__2a2fdae5-346e-4c03-ab92-97c6ce29038c__get_file_metadata',
-      {fileId: DRIVE_ID, excludeContentSnippets: true}
-    );
-    const raw = unwrapMcpText(res);
-    const parsed = raw ? (typeof raw === 'object' ? raw : (() => { try { return JSON.parse(raw); } catch { return {}; } })()) : (typeof res === 'object' ? res : {});
-    const modified = new Date(parsed.modifiedTime||0);
-    const ts = modified.toLocaleDateString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
-    if (modified > BUILT_DATE) {
-      badge.textContent = `⚠️ Drive updated ${ts}`;
-      badge.className = 'sync-badge warn';
-      document.getElementById('driveAlert').classList.add('show');
-    } else {
-      badge.textContent = `✓ Drive synced ${ts}`;
-      badge.className = 'sync-badge ok';
-    }
-  } catch {
-    badge.textContent = '⚠️ Drive check failed';
-    badge.className = 'sync-badge err';
-  }
-}
-
-async function refreshAll() {
-  checkDriveMeta();
-  fetchMatrixFromDrive();
-}
-
-// Fallback embedded matrix data if Drive fetch fails
-const FALLBACK_MATRIX = [
-  {name:'PRODUCT PERFORMANCE MANAGEMENT',cat:'PPM',rows:[
-    {f:'Filter products — Meta metrics',rh:'TRUE',co:'NO',hu:'YES,BUT',ad:'NO',sm:'NO',ma:'YES,BUT',_corr:{hu:'YES,BUT',ma:'YES,BUT'}},
-    {f:'Filter products — Google metrics',rh:'TRUE',co:'NO',hu:'NO',ad:'NO',sm:'NO',ma:'NO',_corr:{}},
-    {f:'Filter products — GA4 metrics',rh:'TRUE',co:'NO',hu:'YES,BUT',ad:'YES,BUT',sm:'NO',ma:'NO',_corr:{}},
-    {f:'Filter products — Adobe metrics',rh:'TRUE',co:'NO',hu:'NO',ad:'NO',sm:'NO',ma:'NO',_corr:{}},
-    {f:'Filter products — Snap metrics',rh:'TRUE',co:'NO',hu:'NO',ad:'NO',sm:'NO',ma:'NO',_corr:{}},
-    {f:'Filter products by feed attributes',rh:'TRUE',co:'NO',hu:'TRUE',ad:'YES,BUT',sm:'NO',ma:'YES,BUT',_corr:{}},
-    {f:'Analytical tools for product analysis',rh:'TRUE',co:'NO',hu:'YES,BUT',ad:'TRUE',sm:'NO',ma:'YES,BUT',_corr:{hu:'YES,BUT',ma:'YES,BUT'}},
-    {f:'Product performance per campaign',rh:'TRUE',co:'NO',hu:'YES,BUT',ad:'TRUE',sm:'NO',ma:'NO',_corr:{hu:'YES,BUT'}},
-    {f:'Dashboard: wasted spend / poor performers',rh:'TRUE',co:'NO',hu:'YES,BUT',ad:'TRUE',sm:'NO',ma:'YES,BUT',_corr:{hu:'YES,BUT',ma:'YES,BUT'}},
-    {f:'SMART Segments — AI-driven SKU segmentation (Top Performers / Poor Performers)',rh:'TRUE',co:'NO',hu:'NO',ad:'NO',sm:'NO',ma:'NO',_corr:{}},
-    {f:'Segment Prioritization — Product Delivery Preference (PDP) allowlist (control SKU promotion without splitting catalogs)',rh:'TRUE',co:'NO',hu:'NO',ad:'NO',sm:'NO',ma:'NO',_corr:{}},
-  ]},
-  {name:'AI / DYNAMIC TOOLS (GenAI additions from May 2026 sales deck)',cat:'AI',rows:[
-    {f:'GenAI — scene / lifestyle background generation',rh:'TRUE',co:'?',hu:'?',ad:'?',sm:'?',ma:'?',_corr:{}},
-    {f:'GenAI — shadow generation',                      rh:'TRUE',co:'?',hu:'?',ad:'?',sm:'?',ma:'?',_corr:{}},
-    {f:'GenAI — Visual Search (filter images by text prompt)',rh:'TRUE',co:'?',hu:'?',ad:'?',sm:'?',ma:'?',_corr:{}},
-  ]},
-];
 
 // ─────────────────── INIT ───────────────────
 renderOverview();
 renderIntel();
 renderSources();
-fetchMatrixFromDrive();
-checkDriveMeta();
-
-// Auto-refresh every 5 minutes
-setInterval(refreshAll, 5 * 60 * 1000);
+loadMatrix();
 </script>
 </body>
 </html>
